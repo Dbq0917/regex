@@ -452,6 +452,8 @@ impl<P: PrefilterI> Strategy for Pre<P> {
 struct Core {
     info: RegexInfo,
     pre: Option<Prefilter>,
+    #[cfg(feature = "perf-literal-multisubstring")]
+    literal_set: Option<crate::meta::literal::LiteralSet>,
     nfa: NFA,
     nfarev: Option<NFA>,
     pikevm: wrappers::PikeVM,
@@ -469,6 +471,8 @@ impl Core {
     ) -> Result<Core, BuildError> {
         let mut lookm = LookMatcher::new();
         lookm.set_line_terminator(info.config().get_line_terminator());
+        #[cfg(feature = "perf-literal-multisubstring")]
+        let literal_set = crate::meta::literal::LiteralSet::new(&info, hirs);
         let thompson_config = info.config().to_thompson_config();
         let nfa = thompson::Compiler::new()
             .configure(thompson_config.clone())
@@ -539,6 +543,8 @@ impl Core {
         Ok(Core {
             info,
             pre,
+            #[cfg(feature = "perf-literal-multisubstring")]
+            literal_set,
             nfa,
             nfarev,
             pikevm,
@@ -703,6 +709,18 @@ impl Strategy for Core {
     fn memory_usage(&self) -> usize {
         self.info.memory_usage()
             + self.pre.as_ref().map_or(0, |pre| pre.memory_usage())
+            + {
+                #[cfg(feature = "perf-literal-multisubstring")]
+                {
+                    self.literal_set
+                        .as_ref()
+                        .map_or(0, |set| set.memory_usage())
+                }
+                #[cfg(not(feature = "perf-literal-multisubstring"))]
+                {
+                    0
+                }
+            }
             + self.nfa.memory_usage()
             + self.nfarev.as_ref().map_or(0, |nfa| nfa.memory_usage())
             + self.onepass.memory_usage()
@@ -770,6 +788,13 @@ impl Strategy for Core {
 
     #[cfg_attr(feature = "perf-inline", inline(always))]
     fn is_match(&self, cache: &mut Cache, input: &Input<'_>) -> bool {
+        #[cfg(feature = "perf-literal-multisubstring")]
+        if let Some(ref set) = self.literal_set {
+            if crate::meta::literal::LiteralSet::is_search_eligible(input) {
+                trace!("using literal set for is-match search");
+                return set.is_match(input);
+            }
+        }
         if let Some(e) = self.dfa.get(input) {
             trace!(
                 "using full DFA for is-match search at {:?}",
@@ -871,6 +896,14 @@ impl Strategy for Core {
         input: &Input<'_>,
         patset: &mut PatternSet,
     ) {
+        #[cfg(feature = "perf-literal-multisubstring")]
+        if let Some(ref set) = self.literal_set {
+            if crate::meta::literal::LiteralSet::is_search_eligible(input) {
+                trace!("using literal set for overlapping search");
+                set.which_overlapping_matches(input, patset);
+                return;
+            }
+        }
         if let Some(e) = self.dfa.get(input) {
             trace!(
                 "using full DFA for overlapping search at {:?}",
